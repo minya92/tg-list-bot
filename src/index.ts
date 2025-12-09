@@ -1,36 +1,28 @@
-import { Telegraf } from "telegraf";
+import { Telegraf, Markup } from "telegraf";
 import * as dotenv from "dotenv";
 
 dotenv.config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN || "");
 
-// Хранилище для business connections
-const businessConnections = new Map<number, string>();
-
-// Типы для Telegram Bot API 9.1 Checklists
-// https://core.telegram.org/bots/api#inputchecklisttask
-interface InputChecklistTask {
-  id: number; // Уникальный идентификатор задачи (должен быть числом!)
-  text: string; // Текст задачи
-  checked?: boolean; // Статус выполнения
+// Типы для задач
+interface Task {
+  id: number;
+  text: string;
+  done: boolean;
 }
 
-// https://core.telegram.org/bots/api#inputchecklist
-interface InputChecklist {
-  title?: string;
-  tasks: InputChecklistTask[];
+// Хранилище чеклистов пользователей: userId -> { taskNumber, tasks, title }
+interface UserChecklist {
+  taskNumber: string;
+  tasks: Task[];
+  title: string;
 }
 
-// Тип для ответа Telegram Bot API
-interface TelegramApiResponse {
-  ok: boolean;
-  description?: string;
-  result?: any;
-}
+const userChecklists = new Map<number, UserChecklist>();
 
-// Хардкодированный список задач
-const tasks = [
+// Хардкодированный список задач (шаблон)
+const taskTemplates = [
   "Передвинуть задачу в Сфере",
   "Создать ветку от релизной",
   "Выполнить задачу",
@@ -51,82 +43,49 @@ const tasks = [
   "После тестирования поменять статус",
 ];
 
-// Обработка business_connection - когда бот подключается к Business Account
-// Примечание: Telegraf может не поддерживать этот тип обновлений напрямую
-// Используем обработчик для всех обновлений
-bot.use(async (ctx, next) => {
-  // @ts-ignore - business_connection может быть не в типах
-  if (ctx.update && ctx.update.business_connection) {
-    // @ts-ignore
-    const connection = ctx.update.business_connection;
-    if (connection && connection.user) {
-      console.log(
-        `✅ Business connection established with user ${connection.user.id}`
-      );
-      console.log(`Connection ID: ${connection.id}`);
+// Создание чеклиста из шаблона
+function createChecklist(taskNumber: string): Task[] {
+  return taskTemplates.map((text, index) => ({
+    id: index + 1,
+    text: text,
+    done: false,
+  }));
+}
 
-      // Сохраняем connection ID для этого пользователя
-      businessConnections.set(connection.user.id, connection.id);
+// Построение inline keyboard из задач
+function buildKeyboard(tasks: Task[]) {
+  const buttons = tasks.map((task) => [
+    Markup.button.callback(
+      `${task.done ? "✅" : "⬜️"} ${task.id}. ${task.text}`,
+      `toggle:${task.id}`
+    ),
+  ]);
 
-      if (connection.is_enabled) {
-        console.log("Business connection is active!");
-      }
-    }
-  }
-  return next();
-});
+  // Добавляем кнопку сброса
+  buttons.push([Markup.button.callback("🔁 Сбросить чеклист", "reset")]);
+
+  return Markup.inlineKeyboard(buttons);
+}
 
 // Команда /start
 bot.command("start", (ctx) => {
-  const hasBusinessConnection =
-    ctx.from && businessConnections.has(ctx.from.id);
-
-  let message =
-    "Привет! Используйте команду /create_list XXX, чтобы создать список задач.\n" +
-    "Например: /create_list 1234\n\n";
-
-  if (hasBusinessConnection) {
-    message +=
-      "✅ Бот подключен к вашему Business Account!\n" +
-      "Чеклисты будут отправлены в нативном формате Telegram.";
-  } else {
-    message +=
-      "ℹ️ Для работы с нативными чеклистами подключите бота к Telegram Business:\n" +
-      "Настройки → Telegram для бизнеса → Подключить чат-бота\n\n" +
-      "Без Business Account чеклисты будут отправлены текстом с эмодзи.";
-  }
-
-  ctx.reply(message);
+  ctx.reply(
+    "Привет! Я бот для создания интерактивных чеклистов задач.\n\n" +
+      "📋 Команды:\n" +
+      "/create_list XXX - создать чеклист для задачи (где XXX - номер)\n" +
+      "Например: /create_list 1234\n\n" +
+      "✨ Чеклист будет интерактивным - нажимайте на задачи, чтобы отметить их выполненными!"
+  );
 });
 
-// Команда для проверки статуса Business подключения
-bot.command("debug", (ctx) => {
+// Команда /create_list
+bot.command("create_list", async (ctx) => {
   const userId = ctx.from?.id;
 
   if (!userId) {
     return ctx.reply("❌ Не удалось определить ваш ID");
   }
 
-  const hasConnection = businessConnections.has(userId);
-  const connectionId = businessConnections.get(userId);
-
-  let message = "🔍 **Статус подключения:**\n\n";
-  message += `Ваш ID: \`${userId}\`\n`;
-  message += `Business Connection: ${
-    hasConnection ? "✅ Активно" : "❌ Не подключено"
-  }\n`;
-
-  if (hasConnection && connectionId) {
-    message += `Connection ID: \`${connectionId}\`\n`;
-  }
-
-  message += `\n📊 Всего активных подключений: ${businessConnections.size}`;
-
-  ctx.reply(message, { parse_mode: "Markdown" });
-});
-
-// Команда /create_list
-bot.command("create_list", async (ctx) => {
   // Получаем аргументы команды
   const args = ctx.message.text.split(" ");
 
@@ -146,109 +105,91 @@ bot.command("create_list", async (ctx) => {
   // Формируем заголовок
   const title = `#task ${taskNumber}. https://sfera-t1.ru/tasks/task/TCOMCLOUD-${taskNumber}`;
 
-  // Формируем InputChecklistTask согласно Bot API 9.1
-  const checklistTasks: InputChecklistTask[] = tasks.map((task, index) => ({
-    id: index + 1, // Уникальный ID для каждой задачи (числовой!)
-    text: `${index + 1}. ${task}`,
-    checked: false,
-  }));
+  // Создаем или обновляем чеклист пользователя
+  const tasks = createChecklist(taskNumber);
+  userChecklists.set(userId, {
+    taskNumber,
+    tasks,
+    title,
+  });
 
-  // Формируем InputChecklist
-  const checklist: InputChecklist = {
-    title: title,
-    tasks: checklistTasks,
-  };
+  // Отправляем интерактивный чеклист
+  await ctx.reply(title, buildKeyboard(tasks));
 
-  // Проверяем, есть ли business connection для этого пользователя
-  const businessConnectionId = ctx.from
-    ? businessConnections.get(ctx.from.id)
-    : undefined;
+  console.log(
+    `✅ Interactive checklist created for user ${userId}, task ${taskNumber}`
+  );
+});
 
-  try {
-    // Используем официальный Telegram Bot API метод sendChecklist
-    // https://core.telegram.org/bots/api#sendchecklist
+// Обработка нажатий на inline-кнопки
+bot.on("callback_query", async (ctx) => {
+  const userId = ctx.from?.id;
 
-    const botToken = process.env.BOT_TOKEN || "";
-    const apiUrl = `https://api.telegram.org/bot${botToken}/sendChecklist`;
+  if (!userId) {
+    return ctx.answerCbQuery("❌ Ошибка идентификации");
+  }
 
-    const requestBody: any = {
-      chat_id: ctx.chat?.id,
-      checklist: checklist,
-    };
+  // Получаем чеклист пользователя
+  let userChecklist = userChecklists.get(userId);
 
-    // Если есть business connection, добавляем его ID
-    if (businessConnectionId) {
-      requestBody.business_connection_id = businessConnectionId;
-      console.log(`Using business connection: ${businessConnectionId}`);
-    }
+  // Если чеклист не найден (бот перезапускался), создаем новый
+  if (!userChecklist) {
+    await ctx.answerCbQuery(
+      "⚠️ Чеклист не найден. Создайте новый с помощью /create_list"
+    );
+    return;
+  }
 
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(requestBody),
-    });
+  // @ts-ignore - callback_query.data существует для data callback queries
+  const data = ctx.callbackQuery.data;
 
-    const result = (await response.json()) as TelegramApiResponse;
+  if (!data) {
+    return ctx.answerCbQuery("❌ Некорректный callback");
+  }
 
-    if (!response.ok || !result.ok) {
-      throw new Error(result.description || "API request failed");
-    }
+  if (data === "reset") {
+    // Сброс всех задач
+    userChecklist.tasks = createChecklist(userChecklist.taskNumber);
+    userChecklists.set(userId, userChecklist);
 
-    console.log("✅ Checklist sent successfully!");
-  } catch (error) {
-    console.error("❌ Error sending checklist:", error);
+    await ctx.editMessageReplyMarkup(
+      buildKeyboard(userChecklist.tasks).reply_markup
+    );
 
-    // Если API не поддерживается, отправляем как обычное сообщение с эмодзи
-    try {
-      await ctx.reply(title);
+    await ctx.answerCbQuery("🔁 Чеклист сброшен");
+    console.log(`🔁 Checklist reset for user ${userId}`);
+    return;
+  }
 
-      const formattedTasks = tasks
-        .map((task, index) => `☐ ${index + 1}. ${task}`)
-        .join("\n");
+  if (data.startsWith("toggle:")) {
+    const taskId = Number(data.split(":")[1]);
+    const task = userChecklist.tasks.find((t) => t.id === taskId);
 
-      await ctx.reply(formattedTasks);
+    if (task) {
+      task.done = !task.done;
 
-      // Показываем более информативное сообщение об ошибке
-      const errorString = String(error);
-      let errorMessage =
-        "⚠️ Официальный API чеклистов недоступен. Список отправлен текстом.\n\n";
+      // Обновляем клавиатуру
+      await ctx.editMessageReplyMarkup(
+        buildKeyboard(userChecklist.tasks).reply_markup
+      );
 
-      // Проверяем тип ошибки
-      if (errorString.includes("PREMIUM_ACCOUNT_REQUIRED")) {
-        errorMessage +=
-          "❌ Ошибка: PREMIUM_ACCOUNT_REQUIRED\n\n" +
-          "Для использования нативных чеклистов требуется:\n" +
-          "• Telegram Premium подписка у получателя\n" +
-          "• Чат должен быть личным (не группа)\n" +
-          "• Функция доступна только для Business аккаунтов\n\n" +
-          "К сожалению, нативные чеклисты Telegram доступны только для Premium пользователей.";
-      } else if (!businessConnectionId) {
-        errorMessage +=
-          "💡 Как включить нативные чеклисты:\n\n" +
-          "1. Убедитесь, что у вас Telegram Premium\n" +
-          "2. Настройки → Telegram для бизнеса → активируйте\n" +
-          "3. Откройте @BotFather → выберите этого бота → Bot Settings → включите Business Mode\n" +
-          "4. Настройки → Telegram для бизнеса → Подключить чат-бота → выберите этого бота\n\n" +
-          "📖 Подробнее: см. файл BUSINESS_SETUP.md в репозитории";
-      } else {
-        errorMessage +=
-          "Бот подключен к Business Account, но API вернул ошибку:\n" +
-          errorString.substring(0, 200);
-      }
+      await ctx.answerCbQuery(
+        task.done ? "✅ Задача выполнена" : "⬜️ Задача не выполнена"
+      );
 
-      await ctx.reply(errorMessage);
-    } catch (fallbackError) {
-      console.error("Error sending fallback message:", fallbackError);
-      ctx.reply("Произошла ошибка при отправке списка задач");
+      console.log(
+        `${task.done ? "✅" : "⬜️"} Task ${taskId} toggled for user ${userId}`
+      );
+    } else {
+      await ctx.answerCbQuery("❌ Задача не найдена");
     }
   }
 });
 
 // Запуск бота
 bot.launch().then(() => {
-  console.log("Bot started successfully!");
+  console.log("🚀 Bot started successfully!");
+  console.log("📋 Using standard Telegram inline keyboard API");
 });
 
 // Graceful stop
