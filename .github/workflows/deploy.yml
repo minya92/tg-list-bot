@@ -1,0 +1,40 @@
+name: Deploy to VDS
+
+on:
+  push:
+    branches:
+      - main # Деплой при push в main ветку
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🚀 Deploy to VDS
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.VDS_HOST }}
+          username: ${{ secrets.VDS_USERNAME }}
+          password: ${{ secrets.VDS_PASSWORD }}
+          port: 22
+          script: |
+            cd ~/tg-list-bot
+
+            echo "🛑 Stopping bot..."
+            pm2 stop tg-list-bot || true
+
+            echo "📥 Pulling latest changes..."
+            git pull origin main
+
+            echo "📦 Installing dependencies..."
+            npm ci
+
+            echo "🔨 Building project..."
+            npm run build
+
+            echo "✅ Starting bot..."
+            pm2 start ecosystem.config.js
+            pm2 save
+
+            echo "📊 Bot status:"
+            pm2 status
