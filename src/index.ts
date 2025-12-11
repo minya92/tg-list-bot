@@ -1,27 +1,81 @@
 import { Telegraf, Markup } from "telegraf";
 import * as dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
 
 dotenv.config();
 
 const bot = new Telegraf(process.env.BOT_TOKEN || "");
 
-// Типы для задач
+// ==== Типы ====
+
 interface Task {
   id: number;
   text: string;
   done: boolean;
 }
 
-// Хранилище чеклистов пользователей: userId -> { taskNumber, tasks, title }
 interface UserChecklist {
   taskNumber: string;
   tasks: Task[];
   title: string;
 }
 
+// ==== Файловое хранилище ====
+
+const STORE_PATH = path.resolve(__dirname, "userChecklists.json");
+
+// userId -> { taskNumber, tasks, title }
 const userChecklists = new Map<number, UserChecklist>();
 
-// Хардкодированный список задач (шаблон)
+// Загрузка данных из файла при старте
+function loadStoreFromFile() {
+  try {
+    if (!fs.existsSync(STORE_PATH)) {
+      console.log("ℹ️ Файл хранилища не найден, начинаем с пустой базы");
+      return;
+    }
+
+    const raw = fs.readFileSync(STORE_PATH, "utf-8");
+    if (!raw.trim()) {
+      console.log("ℹ️ Файл хранилища пустой");
+      return;
+    }
+
+    const parsed = JSON.parse(raw) as Record<string, UserChecklist>;
+
+    Object.entries(parsed).forEach(([idStr, checklist]) => {
+      const userId = Number(idStr);
+      if (!Number.isNaN(userId) && checklist) {
+        userChecklists.set(userId, checklist);
+      }
+    });
+
+    console.log(
+      `📂 Загружено чеклистов из файла: ${userChecklists.size} пользователей`
+    );
+  } catch (err) {
+    console.error("❌ Ошибка при загрузке хранилища из файла:", err);
+  }
+}
+
+// Сохранение Map -> файл
+function saveStoreToFile() {
+  try {
+    const obj: Record<string, UserChecklist> = {};
+    for (const [userId, checklist] of userChecklists.entries()) {
+      obj[String(userId)] = checklist;
+    }
+
+    fs.writeFileSync(STORE_PATH, JSON.stringify(obj, null, 2), "utf-8");
+    // console.log("💾 Хранилище сохранено");
+  } catch (err) {
+    console.error("❌ Ошибка при сохранении хранилища в файл:", err);
+  }
+}
+
+// ==== Логика чеклиста ====
+
 const taskTemplates = [
   "Передвинуть задачу в Сфере",
   "Создать ветку от релизной",
@@ -43,16 +97,14 @@ const taskTemplates = [
   "После тестирования поменять статус",
 ];
 
-// Создание чеклиста из шаблона
 function createChecklist(taskNumber: string): Task[] {
   return taskTemplates.map((text, index) => ({
     id: index + 1,
-    text: text,
+    text,
     done: false,
   }));
 }
 
-// Построение inline keyboard из задач
 function buildKeyboard(tasks: Task[]) {
   const buttons = tasks.map((task) => [
     Markup.button.callback(
@@ -61,24 +113,23 @@ function buildKeyboard(tasks: Task[]) {
     ),
   ]);
 
-  // Добавляем кнопку сброса
   buttons.push([Markup.button.callback("🔁 Сбросить чеклист", "reset")]);
 
   return Markup.inlineKeyboard(buttons);
 }
 
-// Команда /start
+// ==== Команды ====
+
 bot.command("start", (ctx) => {
   ctx.reply(
     "Привет! Я бот для создания интерактивных чеклистов задач.\n\n" +
       "📋 Команды:\n" +
       "/create_list XXX - создать чеклист для задачи (где XXX - номер)\n" +
       "Например: /create_list 1234\n\n" +
-      "✨ Чеклист будет интерактивным - нажимайте на задачи, чтобы отметить их выполненными!"
+      "✨ Чеклист будет интерактивным — нажимайте на задачи, чтобы отметить их выполненными!"
   );
 });
 
-// Команда /create_list
 bot.command("create_list", async (ctx) => {
   const userId = ctx.from?.id;
 
@@ -86,7 +137,6 @@ bot.command("create_list", async (ctx) => {
     return ctx.reply("❌ Не удалось определить ваш ID");
   }
 
-  // Получаем аргументы команды
   const args = ctx.message.text.split(" ");
 
   if (args.length < 2) {
@@ -97,15 +147,12 @@ bot.command("create_list", async (ctx) => {
 
   const taskNumber = args[1];
 
-  // Проверяем, что это число
   if (!/^\d+$/.test(taskNumber)) {
     return ctx.reply("Номер задачи должен содержать только цифры");
   }
 
-  // Формируем заголовок
   const title = `#task ${taskNumber}. https://sfera-t1.ru/tasks/task/TCOMCLOUD-${taskNumber}`;
 
-  // Создаем или обновляем чеклист пользователя
   const tasks = createChecklist(taskNumber);
   userChecklists.set(userId, {
     taskNumber,
@@ -113,7 +160,9 @@ bot.command("create_list", async (ctx) => {
     title,
   });
 
-  // Отправляем интерактивный чеклист
+  // 💾 сохраняем после изменения
+  saveStoreToFile();
+
   await ctx.reply(title, buildKeyboard(tasks));
 
   console.log(
@@ -121,7 +170,8 @@ bot.command("create_list", async (ctx) => {
   );
 });
 
-// Обработка нажатий на inline-кнопки
+// ==== Callback-кнопки ====
+
 bot.on("callback_query", async (ctx) => {
   const userId = ctx.from?.id;
 
@@ -129,10 +179,8 @@ bot.on("callback_query", async (ctx) => {
     return ctx.answerCbQuery("❌ Ошибка идентификации");
   }
 
-  // Получаем чеклист пользователя
   let userChecklist = userChecklists.get(userId);
 
-  // Если чеклист не найден (бот перезапускался), создаем новый
   if (!userChecklist) {
     await ctx.answerCbQuery(
       "⚠️ Чеклист не найден. Создайте новый с помощью /create_list"
@@ -140,17 +188,19 @@ bot.on("callback_query", async (ctx) => {
     return;
   }
 
-  // @ts-ignore - callback_query.data существует для data callback queries
-  const data = ctx.callbackQuery.data;
+  // @ts-ignore
+  const data = ctx.callbackQuery.data as string | undefined;
 
   if (!data) {
     return ctx.answerCbQuery("❌ Некорректный callback");
   }
 
   if (data === "reset") {
-    // Сброс всех задач
     userChecklist.tasks = createChecklist(userChecklist.taskNumber);
     userChecklists.set(userId, userChecklist);
+
+    // 💾 сохраняем после изменения
+    saveStoreToFile();
 
     await ctx.editMessageReplyMarkup(
       buildKeyboard(userChecklist.tasks).reply_markup
@@ -168,7 +218,9 @@ bot.on("callback_query", async (ctx) => {
     if (task) {
       task.done = !task.done;
 
-      // Обновляем клавиатуру
+      // 💾 сохраняем после изменения
+      saveStoreToFile();
+
       await ctx.editMessageReplyMarkup(
         buildKeyboard(userChecklist.tasks).reply_markup
       );
@@ -186,11 +238,20 @@ bot.on("callback_query", async (ctx) => {
   }
 });
 
-// Запуск бота
-bot.launch().then(() => {
-  console.log("🚀 Bot started successfully!");
-  console.log("📋 Using standard Telegram inline keyboard API");
-});
+// ==== Старт бота ====
+
+loadStoreFromFile();
+
+bot
+  .launch()
+  .then(() => {
+    console.log("🚀 Bot started successfully!");
+    console.log("📋 Using standard Telegram inline keyboard API");
+    console.log(`📂 Хранилище: ${STORE_PATH}`);
+  })
+  .catch((err) => {
+    console.error("❌ Ошибка при запуске бота:", err);
+  });
 
 // Graceful stop
 process.once("SIGINT", () => bot.stop("SIGINT"));
