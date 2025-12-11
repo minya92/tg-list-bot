@@ -18,7 +18,7 @@ jobs:
           password: ${{ secrets.VDS_PASSWORD }}
           port: 22
           script: |
-            cd ~/tg-list-bot
+            cd ~/repos/tg-list-bot
 
             echo "🛑 Stopping bot..."
             pm2 stop tg-list-bot || true
