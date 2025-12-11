@@ -16,6 +16,37 @@ ssh ваш_пользователь@ваш_ip_адрес
 
 ### 2. Установите необходимое ПО
 
+#### Вариант A: Через nvm (рекомендуется)
+
+```bash
+# Обновление системы
+sudo apt update && sudo apt upgrade -y
+
+# Установка Git
+sudo apt install -y git
+
+# Установка nvm
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+
+# Перезагрузите оболочку или выполните:
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
+# Установка Node.js через nvm
+nvm install 20
+nvm use 20
+nvm alias default 20
+
+# Проверка установки
+node --version
+npm --version
+
+# Установка PM2 глобально
+npm install -g pm2
+```
+
+#### Вариант B: Системная установка Node.js
+
 ```bash
 # Обновление системы
 sudo apt update && sudo apt upgrade -y
